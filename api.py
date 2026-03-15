@@ -1,11 +1,6 @@
-from email.mime import application
-from pyexpat import model
-from threading import Thread
-
 import requests
 import json
 from config import Config
-import config
 
 class DeepSeekAPI:
     """
@@ -20,7 +15,6 @@ class DeepSeekAPI:
         self.headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
-            "Accept": "application/json"
         }
     def stream_chat(self,messages,thinking=False,temperature=0.7):
         """
@@ -46,6 +40,27 @@ class DeepSeekAPI:
             "messages": messages,
             "stream": True,  # 启用流式传输
             "temperature": temperature,
-            "max_tokens": self.max_token
+            # "max_tokens": self.max_token  TODO:最大token实现
         }
-        
+        try:
+            request_result=requests.post(
+                self.api_url,
+                json=payload,
+                headers=self.headers,
+                stream=True
+            )   # 发送请求
+            request_result.raise_for_status()
+            for line in request_result.iter_lines():
+                if line:
+                    line=line.decode("utf-8")
+                    if line.startswith("data:"):
+                        data=line[5:].strip()
+                        if data:
+                            text_stream=json.loads(data)
+                            print(text_stream)
+        except requests.exceptions.RequestException as e:
+            yield {
+                "success": False,
+                "message": f"API请求错误:{str(e)}",
+                "done": True
+            }

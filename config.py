@@ -4,4 +4,4 @@ class Config:
     DEEPSEEK_API_URL = "https://api.deepseek.com/chat/completions"
     MODEL_THINKING = "deepseek-reasoner"
     MODEL_NOT_THINKING = "deepseek-chat"
-    MAX_TOKEN = 128000
+    MAX_TOKEN = 8192
