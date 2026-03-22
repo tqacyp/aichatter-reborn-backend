@@ -1,6 +1,7 @@
 import requests
 import json
 from config import Config
+import typing
 
 class DeepSeekAPI:
     """
@@ -16,7 +17,7 @@ class DeepSeekAPI:
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
-    def stream_chat(self,messages,thinking=False,temperature=0.7):
+    def stream_chat(self,messages,thinking=False,temperature=0.7) -> typing.Generator[dict, None, None]:
         """
         向DeepSeek API发送流式消息
         
@@ -70,7 +71,8 @@ class DeepSeekAPI:
                             yield {
                                 "success": True,
                                 "done": True,
-                                "message": ""
+                                "reasoning": False,
+                                "message_delta": ""
                             }
                             continue
                         if data:

@@ -3,3 +3,5 @@
 __pycache__
 api-key.txt
 test_api.py
+*.db
+test_communications.py

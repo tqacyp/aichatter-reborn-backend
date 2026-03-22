@@ -1,9 +1,10 @@
-from flask import Flask, abort
+from flask import Flask, abort, request, Response, stream_with_context
 import sqlite3
 from api import DeepSeekAPI
 from datetime import datetime, timedelta
 import uuid
 import os
+import communications
 
 """
     app.py 功能: aichatter-reborn 后端，负责处理api请求，并实现与数据库交互
@@ -31,8 +32,13 @@ def index():
 
 @app.route("/api/send",methods=['POST'])
 def send_request():
-    
-    abort(404)
+    data = request.get_json()
+    if not data:
+        abort(400)
+    if "cache" in data and data["cache"]:
+        # 处理缓存内容
+        pass
+    return Response()
     
 if __name__ == "__main__":
     app.run(host="127.0.0.1",port=5000,debug=True) 
