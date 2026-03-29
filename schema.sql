@@ -5,7 +5,7 @@ PRAGMA foreign_keys = ON;
 CREATE TABLE conversations (
     id TEXT PRIMARY KEY,  -- 存储UUID，如 'abc-123...'
     title TEXT NOT NULL DEFAULT '新对话',
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 -- 消息表
