@@ -51,17 +51,28 @@ def get_db():
     conn = sqlite3.connect(DB_PATH)
     return conn
 
-def load_conversation_history(conversation_id, limit=20):
+def load_conversation_history(conversation_id, limit=20, exclude_message_id=None):
     """加载指定对话的历史消息"""
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("""
-        SELECT role, content
-        FROM messages
-        WHERE conversation_id = ? AND is_reasoning = 0
-        ORDER BY created_at ASC
-        LIMIT ?
-    """, (conversation_id, limit))
+
+    if exclude_message_id:
+        # 排除指定ID的消息
+        cur.execute("""
+            SELECT role, content
+            FROM messages
+            WHERE conversation_id = ? AND is_reasoning = 0 AND id != ?
+            ORDER BY created_at ASC
+            LIMIT ?
+        """, (conversation_id, exclude_message_id, limit))
+    else:
+        cur.execute("""
+            SELECT role, content
+            FROM messages
+            WHERE conversation_id = ? AND is_reasoning = 0
+            ORDER BY created_at ASC
+            LIMIT ?
+        """, (conversation_id, limit))
 
     messages = []
     for row in cur.fetchall():
@@ -105,7 +116,7 @@ def generate_conversation_title(user_message, assistant_reply):
         first_sentence = user_message[:first_sentence_end].strip()
 
         # 3. 只取前20个字符（8-10个汉字，根据用户偏好）
-        max_title_length = 20
+        max_title_length = 10
         if len(first_sentence) > max_title_length:
             title = first_sentence[:max_title_length]
         else:
@@ -239,9 +250,9 @@ def send_request():
         print(f"保存用户消息失败: {e}")
         abort(500, description="保存用户消息失败")
 
-    # 4. 加载历史消息
+    # 4. 加载历史消息（排除刚保存的用户消息，避免重复）
     try:
-        history_messages = load_conversation_history(conversation_id)
+        history_messages = load_conversation_history(conversation_id, exclude_message_id=user_message_id)
     except Exception as e:
         conn.close()
         print(f"加载历史消息失败: {e}")
