@@ -14,6 +14,7 @@ CREATE TABLE messages (
     conversation_id TEXT NOT NULL,
     role TEXT NOT NULL CHECK(role IN ('user', 'assistant', 'system')), -- 限制角色值
     content TEXT NOT NULL,
+    is_reasoning BOOLEAN NOT NULL DEFAULT 0, -- 是否为思考内容
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE -- 会话删除时，关联消息自动删除
 );

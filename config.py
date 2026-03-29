@@ -5,3 +5,4 @@ class Config:
     MODEL_THINKING = "deepseek-reasoner"
     MODEL_NOT_THINKING = "deepseek-chat"
     MAX_TOKEN = 8192
+    SYSTEM_PROMPT = "你是一个有帮助的AI助手。请用中文回答用户的问题。"
