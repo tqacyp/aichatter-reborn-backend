@@ -43,14 +43,17 @@ class DeepSeekAPI:
         
         if thinking:
             model_name=self.model_thinking
+            thinking_enabled = "enabled"
         else:
             model_name=self.model_not_thinking
+            thinking_enabled = "disabled"
         
         payload = {          # 请求内容
             "model": model_name,
             "messages": messages,
             "stream": True,  # 启用流式传输
             "temperature": temperature,
+            "thinking": { "type": thinking_enabled }
             # "max_tokens": self.max_token  TODO:最大token实现
         }
         try:
