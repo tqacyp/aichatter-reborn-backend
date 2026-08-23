@@ -1,6 +1,8 @@
 from flask import Flask, abort, request, Response, stream_with_context, jsonify
 from flask_cors import CORS
 import sqlite3
+import threading
+import time
 from api import DeepSeekAPI
 from datetime import datetime, timedelta
 import uuid
@@ -15,6 +17,7 @@ import config
 
 app = Flask(__name__)
 deepseek_api = DeepSeekAPI()
+ACTIVE_GENERATIONS = {}  # conversation_id -> threading.Event，用于停止正在生成的回复
 DB_PATH = os.path.join(os.path.dirname(__file__),"messages.db")
 SQL_PATH = os.path.join(os.path.dirname(__file__),"schema.sql")
 CORS(app, origins=['http://localhost:5173','http://127.0.0.1:5173'])
@@ -52,27 +55,29 @@ def get_db():
     return conn
 
 def load_conversation_history(conversation_id, limit=20, exclude_message_id=None):
-    """加载指定对话的历史消息"""
+    """加载指定对话的最近历史消息（按时间正序返回）"""
     conn = get_db()
     cur = conn.cursor()
 
+    exclude_sql = ""
+    params = [conversation_id]
     if exclude_message_id:
-        # 排除指定ID的消息
-        cur.execute("""
-            SELECT role, content
+        exclude_sql = " AND id != ?"
+        params.append(exclude_message_id)
+    params.append(limit)
+
+    # 先按时间倒序取最近 limit 条，再翻转为正序，避免长对话只取到最早的消息
+    cur.execute(f"""
+        SELECT role, content
+        FROM (
+            SELECT role, content, created_at, rowid
             FROM messages
-            WHERE conversation_id = ? AND is_reasoning = 0 AND id != ?
-            ORDER BY created_at ASC
+            WHERE conversation_id = ? AND is_reasoning = 0{exclude_sql}
+            ORDER BY created_at DESC, rowid DESC
             LIMIT ?
-        """, (conversation_id, exclude_message_id, limit))
-    else:
-        cur.execute("""
-            SELECT role, content
-            FROM messages
-            WHERE conversation_id = ? AND is_reasoning = 0
-            ORDER BY created_at ASC
-            LIMIT ?
-        """, (conversation_id, limit))
+        )
+        ORDER BY created_at ASC, rowid ASC
+    """, params)
 
     messages = []
     for row in cur.fetchall():
@@ -204,15 +209,14 @@ def new_session():
             (conversation_id,)
         )
         conn.commit()
+        # 返回UUID
+        return jsonify({"uuid": conversation_id})
     except Exception as e:
+        conn.rollback()
         print(f"插入对话记录失败: {e}")
-        conn.close()
         abort(500, description="数据库插入失败")
     finally:
         conn.close()
-
-    # 返回UUID
-    return jsonify({"uuid": conversation_id})
 
 @app.route("/api/send",methods=['POST'])
 def send_request():
@@ -228,7 +232,11 @@ def send_request():
     if not conversation_id or not user_message:
         abort(400, description="缺少必要参数: conversation_id 或 message")
 
-    # 2. 验证对话存在
+    # 2. 同一对话已有正在生成的回复时直接拒绝，避免消息乱序
+    if conversation_id in ACTIVE_GENERATIONS:
+        return jsonify({"success": False, "error": "该对话正在生成回复，请稍候"}), 409
+
+    # 3. 验证对话存在
     conn = get_db()
     cur = conn.cursor()
     cur.execute("SELECT id FROM conversations WHERE id = ?", (conversation_id,))
@@ -236,11 +244,11 @@ def send_request():
         conn.close()
         abort(404, description="对话不存在")
 
-    # 3. 保存用户消息（使用事务）
-    user_message_id = str(uuid.uuid4())
+    # 4. 保存用户消息（使用事务；客户端重试时复用同一个 id，避免重复入库）
+    user_message_id = data.get('client_message_id') or str(uuid.uuid4())
     try:
         cur.execute(
-            "INSERT INTO messages (id, conversation_id, role, content, is_reasoning) VALUES (?, ?, 'user', ?, 0)",
+            "INSERT OR IGNORE INTO messages (id, conversation_id, role, content, is_reasoning) VALUES (?, ?, 'user', ?, 0)",
             (user_message_id, conversation_id, user_message)
         )
         conn.commit()
@@ -250,7 +258,7 @@ def send_request():
         print(f"保存用户消息失败: {e}")
         abort(500, description="保存用户消息失败")
 
-    # 4. 加载历史消息（排除刚保存的用户消息，避免重复）
+    # 5. 加载历史消息（排除刚保存的用户消息，避免重复）
     try:
         history_messages = load_conversation_history(conversation_id, exclude_message_id=user_message_id)
     except Exception as e:
@@ -258,7 +266,7 @@ def send_request():
         print(f"加载历史消息失败: {e}")
         abort(500, description="加载历史消息失败")
 
-    # 5. 构建完整上下文
+    # 6. 构建完整上下文
     try:
         full_context = build_message_context(history_messages, user_message)
     except Exception as e:
@@ -266,7 +274,7 @@ def send_request():
         print(f"构建消息上下文失败: {e}")
         abort(500, description="构建消息上下文失败")
 
-    # 6. 准备助手消息存储
+    # 7. 准备助手消息存储
     assistant_message_id = str(uuid.uuid4())
     assistant_content = ""
     reasoning_content = ""
@@ -275,9 +283,14 @@ def send_request():
     def generate():
         nonlocal assistant_content, reasoning_content
 
+        cancel_event = threading.Event()
+        ACTIVE_GENERATIONS[conversation_id] = cancel_event
+
         try:
             # 调用通信模块获取流式响应
-            response_stream = communications.send_response_to_frontend(full_context, thinking)
+            response_stream = communications.send_response_to_frontend(
+                full_context, thinking, cancel_event=cancel_event
+            )
 
             for chunk in response_stream:
                 # 直接转发SSE格式的chunk
@@ -300,7 +313,7 @@ def send_request():
                     except json.JSONDecodeError:
                         continue
 
-            # 流结束后保存消息
+            # 流结束后保存消息（主动停止时也会保留已生成的部分内容）
             if reasoning_content:
                 # 保存思考内容
                 save_reasoning_message(conversation_id, reasoning_message_id, reasoning_content)
@@ -321,17 +334,13 @@ def send_request():
                     if not update_conversation_title(conversation_id, title, force_update=True):
                         print(f"警告：对话 {conversation_id} 标题更新失败，保持为: {existing_title}")
 
-            conn.close()
-
         except Exception as e:
             # 发生错误，回滚用户消息
             try:
                 cur.execute("DELETE FROM messages WHERE id = ?", (user_message_id,))
                 conn.commit()
-            except:
+            except Exception:
                 pass  # 忽略回滚错误
-            finally:
-                conn.close()
 
             # 发送错误消息
             error_msg = json.dumps({
@@ -342,11 +351,44 @@ def send_request():
             yield f"data: {error_msg}\n\n"
             return
 
-    return Response(generate(), mimetype='text/event-stream')
+        finally:
+            ACTIVE_GENERATIONS.pop(conversation_id, None)
+            conn.close()
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype='text/event-stream',
+        headers={
+            'Cache-Control': 'no-cache',
+            'X-Accel-Buffering': 'no',
+            'Connection': 'keep-alive',
+        }
+    )
+
+@app.route("/api/stop", methods=['POST'])
+def stop_generation():
+    """停止指定对话正在进行的流式生成，并等待其保存已生成的部分内容"""
+    data = request.get_json(silent=True) or {}
+    conversation_id = data.get('conversation_id')
+    if not conversation_id:
+        abort(400, description="缺少必要参数: conversation_id")
+
+    cancel_event = ACTIVE_GENERATIONS.get(conversation_id)
+    if cancel_event:
+        cancel_event.set()
+        # 最多等待 5 秒，让生成协程收到取消标记并保存部分回复
+        deadline = time.time() + 5
+        while time.time() < deadline and ACTIVE_GENERATIONS.get(conversation_id) is cancel_event:
+            time.sleep(0.05)
+        return jsonify({"success": True, "stopped": True})
+
+    return jsonify({"success": True, "stopped": False})
+
 
 @app.route("/api/conversations", methods=['GET'])
 def get_conversations():
     """获取所有对话列表，按创建时间倒序排列"""
+    conn = None
     try:
         conn = get_db()
         cur = conn.cursor()
@@ -360,22 +402,24 @@ def get_conversations():
                 "created_at": row[2]
             })
 
-        conn.close()
         return jsonify({"success": True, "conversations": conversations})
     except Exception as e:
         print(f"获取对话列表失败: {e}")
         return jsonify({"success": False, "error": "获取对话列表失败"}), 500
+    finally:
+        if conn:
+            conn.close()
 
 @app.route("/api/chat/<conversation_id>/messages", methods=['GET'])
 def get_conversation_messages(conversation_id):
     """获取特定对话的消息历史"""
+    conn = None
     try:
         # 验证对话存在
         conn = get_db()
         cur = conn.cursor()
         cur.execute("SELECT id FROM conversations WHERE id = ?", (conversation_id,))
         if not cur.fetchone():
-            conn.close()
             return jsonify({"success": False, "error": "对话不存在"}), 404
 
         # 获取消息（包含思考内容）
@@ -383,7 +427,7 @@ def get_conversation_messages(conversation_id):
             SELECT role, content, created_at, is_reasoning
             FROM messages
             WHERE conversation_id = ?
-            ORDER BY created_at ASC
+            ORDER BY created_at ASC, rowid ASC
         """, (conversation_id,))
 
         messages = []
@@ -395,11 +439,13 @@ def get_conversation_messages(conversation_id):
                 "is_reasoning": bool(row[3])  # 转换为布尔值
             })
 
-        conn.close()
         return jsonify({"success": True, "messages": messages})
     except Exception as e:
         print(f"获取对话消息失败: {e}")
         return jsonify({"success": False, "error": "获取消息失败"}), 500
+    finally:
+        if conn:
+            conn.close()
 
 @app.route("/api/test",methods=['GET','POST'])
 def test():

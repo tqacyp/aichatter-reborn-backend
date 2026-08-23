@@ -5,4 +5,5 @@ class Config:
     MODEL_THINKING = "deepseek-v4-pro"
     MODEL_NOT_THINKING = "deepseek-v4-flash"
     MAX_TOKEN = 8192
+    REQUEST_TIMEOUT = (10, 120)  # (连接超时, 流式读取超时)
     SYSTEM_PROMPT = "你是一个有帮助的AI助手。请用中文回答用户的问题。"
