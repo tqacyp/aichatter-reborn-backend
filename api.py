@@ -9,20 +9,36 @@ class DeepSeekAPI:
     模块化设计，api.py只负责发送完整上下文内容到api.deepseek.com，对话历史由app.py维护。
     """
 
+    # 官方文档允许的思考强度取值（medium/xhigh 会被映射为 high）
+    ALLOWED_REASONING_EFFORTS = {"low", "medium", "high", "xhigh", "max"}
+
     def __init__(self) -> None:
         self.api_key = Config.DEEPSEEK_API_KEY
         self.api_url = Config.DEEPSEEK_API_URL
-        self.model_thinking = Config.MODEL_THINKING
-        self.model_not_thinking = Config.MODEL_NOT_THINKING
+        self.model = Config.MODEL
         self.max_token = Config.MAX_TOKEN
+        self.reasoning_effort = self._normalize_effort(Config.REASONING_EFFORT)
         self.headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
 
+    def _normalize_effort(self, effort):
+        """校验 config 中的 reasoning_effort，非法值回退为官方默认 high 并打印警告"""
+        value = (effort or "").strip().lower()
+        if value in self.ALLOWED_REASONING_EFFORTS:
+            return value
+        print(f"警告: 无效的 REASONING_EFFORT 配置 '{effort}'，已回退为默认值 'high'")
+        return "high"
+
     def stream_chat(self, messages, thinking=False, temperature=0.7, cancel_event=None) -> typing.Generator[dict, None, None]:
         """
         向DeepSeek API发送流式消息
+
+        请求体（官方文档 OpenAI 格式）:
+            model:            Config.MODEL（统一 deepseek-v4-flash）
+            thinking:         {"type": "enabled"/"disabled"} 思考模式开关
+            reasoning_effort: Config.REASONING_EFFORT 思考强度 (low/medium/high/xhigh/max)
 
         Args:
             messages: 完整消息上下文
@@ -37,19 +53,18 @@ class DeepSeekAPI:
         if messages is None:
             raise ValueError("Messages can't be empty")
 
-        if thinking:
-            model_name = self.model_thinking
-            thinking_enabled = "enabled"
-        else:
-            model_name = self.model_not_thinking
-            thinking_enabled = "disabled"
+        # 思考开关（OpenAI 格式顶层参数）:
+        #   {"thinking": {"type": "enabled"/"disabled"}}
+        thinking_type = "enabled" if thinking else "disabled"
 
         payload = {
-            "model": model_name,
+            "model": self.model,
             "messages": messages,
             "stream": True,
             "temperature": temperature,
-            "thinking": {"type": thinking_enabled},
+            "thinking": {"type": thinking_type},
+            # 思考强度控制（OpenAI 格式顶层参数 reasoning_effort），在 config.py 中配置
+            "reasoning_effort": self.reasoning_effort,
             # "max_tokens": self.max_token  TODO:最大token实现
         }
 
